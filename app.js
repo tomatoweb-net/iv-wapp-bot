@@ -18,10 +18,10 @@ let proxyIp = "Non disponibile";
 let clientInstance;
 
 // **CONFIGURA IL PROXY AIRPROXY**
-const PROXY_HOST = 's6.airproxy.io';
-const PROXY_PORT = '20706';
-const PROXY_USERNAME = 'comunicapervincere';
-const PROXY_PASSWORD = 'comunicapervincere';
+const PROXY_HOST = 'xxxx';
+const PROXY_PORT = 'xxx';
+const PROXY_USERNAME = 'xxxx';
+const PROXY_PASSWORD = 'xxx';
 
 // **CONVERSIONE PROXY SE NECESSARIO**
 async function getProxyUrl() {
