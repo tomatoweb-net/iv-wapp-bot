@@ -105,6 +105,28 @@ async function createClient() {
         }
     });
 
+    clientInstance.on('message_create', async (msg) => {
+        try {
+            const messageData = {
+                id: msg.id._serialized,
+                from: msg.from,
+                to: msg.to,
+                body: msg.body,
+                timestamp: msg.timestamp,
+                type: msg.type,
+                fromMe: msg.fromMe  // Indica se il messaggio è stato inviato dal bot
+            };
+    
+            console.log('📤 Messaggio inviato:', JSON.stringify(messageData, null, 2));
+    
+            await axios.post(WEBHOOK_URL, messageData, { maxRedirects: 5 });
+    
+        } catch (error) {
+            console.error('❌ Errore invio messaggio inviato alla webhook:', error.message);
+        }
+    });
+    
+
     clientInstance.initialize();
 }
 
