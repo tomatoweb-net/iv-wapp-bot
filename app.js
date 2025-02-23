@@ -1,15 +1,21 @@
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const express = require('express');
 const qrcode = require('qrcode-terminal');
+const qrcodeImg = require('qrcode');
 const ProxyChain = require('proxy-chain');
 const axios = require('axios');
+const { exec } = require('child_process');
 
 const WEBHOOK_URL = 'https://hook.eu1.make.com/r4ydnwo7htapbbl8ihzesevwyx5pt782';
 const app = express();
 const port = process.env.PORT || 3000;
 
-let qrCodeGenerated = false; // Flag per evitare rigenerazione continua
-let clientInstance; // Per mantenere il client attivo
+let qrCodeBase64 = null;
+let botStatus = "❌ Non Attivo";
+let connectedPhone = "Nessun telefono connesso";
+let serverIp = "Non disponibile";
+let proxyIp = "Non disponibile";
+let clientInstance;
 
 // **CONFIGURA IL PROXY AIRPROXY**
 const PROXY_HOST = 's6.airproxy.io';
@@ -20,6 +26,7 @@ const PROXY_PASSWORD = 'comunicapervincere';
 // **CONVERSIONE PROXY SE NECESSARIO**
 async function getProxyUrl() {
     const proxyUrl = `socks5://${PROXY_USERNAME}:${PROXY_PASSWORD}@${PROXY_HOST}:${PROXY_PORT}`;
+    console.log(`🌍 Proxy configurato: ${proxyUrl}`);
     return await ProxyChain.anonymizeProxy(proxyUrl);
 }
 
@@ -39,32 +46,43 @@ async function createClient() {
         }
     });
 
-    // **Autenticazione Manuale del Proxy**
+    // **Autenticazione Proxy**
     clientInstance.on('puppeteer:page', async (page) => {
         await page.authenticate({
             username: PROXY_USERNAME,
             password: PROXY_PASSWORD
         });
+        console.log("🔑 Proxy autenticato con successo su Puppeteer!");
     });
 
-    // **QR Code: Genera solo se necessario**
-    clientInstance.on('qr', (qr) => {
-        if (!qrCodeGenerated) {
-            console.log('✅ QR Code generato, scansiona con WhatsApp:');
-            qrcode.generate(qr, { small: true, compact: true });
-            qrCodeGenerated = true;
-        }
+    // **QR Code**
+    clientInstance.on('qr', async (qr) => {
+        console.log('✅ QR Code generato, scansiona con WhatsApp:');
+        qrcode.generate(qr, { small: true, compact: true });
+        qrCodeBase64 = await qrcodeImg.toDataURL(qr);
     });
 
     // **Client Pronto**
-    clientInstance.on('ready', () => {
+    clientInstance.on('ready', async () => {
         console.log('✅ WhatsApp client è pronto e in ascolto!');
-        qrCodeGenerated = true;
+        botStatus = "✅ Attivo";
+        connectedPhone = clientInstance.info ? clientInstance.info.wid.user : "Nessun telefono connesso";
     });
 
-    // **Autenticato con successo**
+    // **Autenticazione completata**
     clientInstance.on('authenticated', () => {
         console.log('✅ Autenticazione completata!');
+        botStatus = "✅ Attivo";
+    });
+
+    // **Gestione disconnessione**
+    clientInstance.on('disconnected', () => {
+        console.error('❌ WhatsApp Disconnesso.');
+        botStatus = "❌ Non Attivo";
+        connectedPhone = "Nessun telefono connesso";
+        qrCodeBase64 = null;
+        console.log('🔄 Riavvio del client in corso...');
+        setTimeout(createClient, 5000); // Riavvia dopo 5 secondi
     });
 
     // **Messaggi in Arrivo → Webhook**
@@ -78,77 +96,123 @@ async function createClient() {
                 type: msg.type
             };
 
-            console.log('📩 Messaggio ricevuto:', messageData);
-            await axios.post(WEBHOOK_URL, messageData);
+            console.log('📤 Inviando alla webhook:', JSON.stringify(messageData, null, 2));
+
+            await axios.post(WEBHOOK_URL, messageData, { maxRedirects: 5 });
+
         } catch (error) {
-            console.error('❌ Errore invio messaggio in arrivo:', error);
+            console.error('❌ Errore invio alla webhook:', error.message);
         }
-    });
-
-    // **Messaggi Inviati → Webhook**
-    clientInstance.on('message_create', async (msg) => {
-        if (msg.fromMe) {
-            try {
-                const messageData = {
-                    id: msg.id._serialized,
-                    to: msg.to,
-                    body: msg.body,
-                    timestamp: msg.timestamp,
-                    type: msg.type
-                };
-
-                console.log('📤 Messaggio inviato:', messageData);
-                await axios.post(WEBHOOK_URL, messageData);
-            } catch (error) {
-                console.error('❌ Errore invio messaggio in uscita:', error);
-            }
-        }
-    });
-
-    // **Gestione della disconnessione e riconnessione**
-    clientInstance.on('disconnected', (reason) => {
-        console.error('❌ WhatsApp Disconnesso:', reason);
-        qrCodeGenerated = false;
-        console.log('🔄 Riavvio del client in corso...');
-        setTimeout(createClient, 5000); // Riavvia il client dopo 5 secondi
     });
 
     clientInstance.initialize();
 }
 
-// **Server Express per QR Code e Stato del Bot**
+// **Verifica IP Server e Proxy**
+app.get('/proxy-status', async (req, res) => {
+    try {
+        // IP Server (senza proxy)
+        const serverIpResponse = await axios.get('https://ifconfig.me');
+        serverIp = serverIpResponse.data.trim();
+
+        // IP Proxy (usando il proxy)
+        const proxyIpResponse = await axios.get('https://ifconfig.me', {
+            proxy: {
+                protocol: 'socks5',
+                host: PROXY_HOST,
+                port: PROXY_PORT,
+                auth: {
+                    username: PROXY_USERNAME,
+                    password: PROXY_PASSWORD
+                }
+            }
+        });
+
+        proxyIp = proxyIpResponse.data.trim();
+        res.json({ server_ip: serverIp, proxy_ip: proxyIp });
+
+    } catch (error) {
+        res.json({ server_ip: "Non disponibile", proxy_ip: "Non disponibile" });
+    }
+});
+
+// **API per Stato del Bot**
+app.get('/status', (req, res) => {
+    res.json({
+        status: botStatus,
+        phone: connectedPhone,
+        qr: qrCodeBase64
+    });
+});
+
+// **API per Scollegare e Rigenerare il QR**
+app.get('/new-qr', (req, res) => {
+    clientInstance.logout();
+    qrCodeBase64 = null;
+    res.send("✅ Dispositivo scollegato! Ricarica la pagina per un nuovo QR.");
+});
+
+// **API per Riavviare il Bot**
+app.get('/restart-bot', (req, res) => {
+    exec("sudo systemctl restart whatsapp-bot", (error, stdout, stderr) => {
+        res.send(error ? `Errore: ${stderr}` : "✅ Bot riavviato con successo!");
+    });
+});
+
+// **Pagina Web di Controllo**
 app.get('/', (req, res) => {
     res.send(`
         <html>
         <head>
-            <title>WhatsApp Bot - QR Code</title>
-            <meta http-equiv="refresh" content="5">
+            <title>Gestione WhatsApp Bot</title>
             <style>
-                body { text-align: center; font-family: Arial, sans-serif; }
+                body { font-family: Arial, sans-serif; text-align: center; }
                 h1 { color: #25D366; }
+                button { padding: 10px 20px; margin: 10px; cursor: pointer; }
+                img { margin-top: 20px; width: 300px; }
             </style>
         </head>
         <body>
-            <h1>Scansiona il QR Code</h1>
-            ${qrCodeGenerated ? '<p>✅ WhatsApp connesso!</p>' : '<p>🔄 In attesa di connessione...</p>'}
+            <h1>📲 Gestione WhatsApp Bot</h1>
+            <p><strong>Stato:</strong> <span id="status">Caricamento...</span></p>
+            <p><strong>Telefono Collegato:</strong> <span id="phone">Caricamento...</span></p>
+            <p><strong>IP Server:</strong> <span id="server-ip">Caricamento...</span></p>
+            <p><strong>IP Proxy:</strong> <span id="proxy-ip">Caricamento...</span></p>
+
+            <button onclick="location.href='/new-qr'">🔄 Scollega & Genera QR</button>
+            <button onclick="location.href='/restart-bot'">🔄 Riavvia Bot</button>
+            <button onclick="updateProxyStatus()">🌍 Controlla Proxy</button>
+
+            <h3>Scansiona il QR per connetterti:</h3>
+            <img id="qr-code" src="" alt="QR Code" />
+
+            <script>
+                async function updateStatus() {
+                    const response = await fetch('/status');
+                    const data = await response.json();
+                    document.getElementById('status').textContent = data.status;
+                    document.getElementById('phone').textContent = data.phone;
+                    document.getElementById('qr-code').src = data.qr || '';
+                }
+
+                async function updateProxyStatus() {
+                    const response = await fetch('/proxy-status');
+                    const data = await response.json();
+                    document.getElementById('server-ip').textContent = data.server_ip;
+                    document.getElementById('proxy-ip').textContent = data.proxy_ip;
+                }
+
+                setInterval(updateStatus, 5000);
+                updateStatus();
+                updateProxyStatus();
+            </script>
         </body>
         </html>
     `);
 });
 
-// **Endpoint per controllare lo stato del bot**
-app.get('/status', (req, res) => {
-    if (qrCodeGenerated) {
-        res.json({ status: "CONNECTED", message: "Il bot è attivo e funzionante!" });
-    } else {
-        res.json({ status: "DISCONNECTED", message: "Il bot è disconnesso o in attesa di connessione." });
-    }
-});
-
-// **Avvia il Server Express**
-app.listen(port, () => {
-    console.log(`🌐 Server Express in esecuzione su http://localhost:${port}`);
-});
+// **Avvia il Server**
+app.listen(port, () => console.log(`🌐 Server Express in esecuzione su http://localhost:${port}`));
 
 // **Avvia il Client WhatsApp**
 createClient();
